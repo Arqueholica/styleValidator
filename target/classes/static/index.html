@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocStyler - Style Validation</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .drop-zone { border: 2px dashed #cbd5e1; transition: all 0.2s; }
+        .drop-zone.drag-over { border-color: #3b82f6; background: #eff6ff; }
+        .badge { padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+        .badge-exact { background: #d1fae5; color: #065f46; }
+        .badge-close { background: #fef3c7; color: #92400e; }
+        .badge-unknown { background: #fee2e2; color: #991b1b; }
+        .badge-uploaded { background: #dbeafe; color: #1e40af; }
+        .badge-extracted { background: #e0e7ff; color: #3730a3; }
+        .badge-compared { background: #d1fae5; color: #065f46; }
+        .badge-error { background: #fee2e2; color: #991b1b; }
+        .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; font-weight: 600; }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .spinner { border: 3px solid #e5e7eb; border-top: 3px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 0.8s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .confidence-bar { height: 6px; border-radius: 3px; background: #e5e7eb; }
+        .confidence-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const API = '/api';
+
+// ─── API Helpers ───────────────────────────────────────────
+async function api(path, opts = {}) {
+    const res = await fetch(API + path, opts);
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || 'Request failed');
+    }
+    if (res.status === 204) return null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('json')) return res.json();
+    return res;
+}
+
+// ─── Toast Notification ────────────────────────────────────
+function Toast({ message, type, onClose }) {
+    useEffect(() => { const t = setTimeout(onClose, 4000); return () => clearTimeout(t); }, []);
+    const bg = type === 'error' ? 'bg-red-500' : type === 'success' ? 'bg-green-500' : 'bg-blue-500';
+    return (
+        <div className={`fixed top-4 right-4 ${bg} text-white px-4 py-3 rounded-lg shadow-lg z-50 fade-in flex items-center gap-2`}>
+            <span>{message}</span>
+            <button onClick={onClose} className="ml-2 font-bold">&times;</button>
+        </div>
+    );
+}
+
+// ─── Upload Zone ───────────────────────────────────────────
+function UploadZone({ onUpload }) {
+    const [dragging, setDragging] = useState(false);
+    const [uploading, setUploading] = useState(false);
+    const fileRef = useRef();
+
+    const handleFiles = async (files) => {
+        if (!files.length) return;
+        setUploading(true);
+        try {
+            for (const file of files) {
+                const fd = new FormData();
+                fd.append('file', file);
+                await api('/documents/upload', { method: 'POST', body: fd });
+            }
+            onUpload();
+        } finally { setUploading(false); }
+    };
+
+    return (
+        <div
+            className={`drop-zone rounded-xl p-10 text-center cursor-pointer ${dragging ? 'drag-over' : ''}`}
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={e => { e.preventDefault(); setDragging(false); handleFiles(e.dataTransfer.files); }}
+            onClick={() => fileRef.current?.click()}
+        >
+            <input ref={fileRef} type="file" accept=".docx,.idml" multiple hidden
+                onChange={e => handleFiles(e.target.files)} />
+            {uploading ? (
+                <div><div className="spinner mx-auto mb-3"></div><p className="text-gray-500">Uploading...</p></div>
+            ) : (
+                <div>
+                    <svg className="mx-auto mb-3 text-gray-400" width="48" height="48" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+                    </svg>
+                    <p className="text-gray-600 font-medium">Drop .docx or .idml files here</p>
+                    <p className="text-gray-400 text-sm mt-1">or click to browse</p>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Document List ─────────────────────────────────────────
+function DocumentList({ documents, onSelect, selected, onRefresh }) {
+    if (!documents.length) return <p className="text-gray-400 text-center py-8">No documents uploaded yet.</p>;
+    return (
+        <div className="space-y-2">
+            {documents.map(doc => (
+                <div key={doc.id}
+                    className={`p-4 rounded-lg border cursor-pointer transition-all hover:shadow-md ${selected?.id === doc.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white'}`}
+                    onClick={() => onSelect(doc)}>
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <p className="font-medium text-gray-800">{doc.filename}</p>
+                            <p className="text-xs text-gray-400 mt-1">
+                                {doc.fileType?.toUpperCase()} &middot; {doc.styleCount || 0} styles &middot; {new Date(doc.createdAt).toLocaleDateString()}
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className={`badge badge-${doc.status}`}>{doc.status}</span>
+                            <button onClick={e => { e.stopPropagation(); deleteDoc(doc.id, onRefresh); }}
+                                className="text-gray-400 hover:text-red-500 transition-colors" title="Delete">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+async function deleteDoc(id, onRefresh) {
+    if (!confirm('Delete this document?')) return;
+    await api(`/documents/${id}`, { method: 'DELETE' });
+    onRefresh();
+}
+
+// ─── Extraction View ───────────────────────────────────────
+function ExtractionView({ structure }) {
+    if (!structure) return null;
+    const [tab, setTab] = useState('styles');
+    return (
+        <div className="fade-in">
+            <div className="flex gap-4 border-b mb-4">
+                {['styles', 'structure'].map(t => (
+                    <button key={t} className={`pb-2 px-1 capitalize ${tab === t ? 'tab-active' : 'text-gray-400'}`}
+                        onClick={() => setTab(t)}>{t}</button>
+                ))}
+            </div>
+            {tab === 'styles' && (
+                <div className="overflow-auto max-h-96">
+                    <table className="w-full text-sm">
+                        <thead><tr className="text-left text-gray-500 border-b">
+                            <th className="pb-2">Style Name</th><th className="pb-2">Type</th><th className="pb-2">Uses</th><th className="pb-2">Built-in</th>
+                        </tr></thead>
+                        <tbody>
+                            {structure.styles.map((s, i) => (
+                                <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                                    <td className="py-2 font-medium">{s.name}</td>
+                                    <td className="py-2 text-gray-500">{s.type}</td>
+                                    <td className="py-2">{s.usageCount}</td>
+                                    <td className="py-2">{s.builtIn ? '✓' : ''}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+            {tab === 'structure' && (
+                <div className="overflow-auto max-h-96 space-y-1">
+                    {structure.entries.slice(0, 200).map((e, i) => (
+                        <div key={i} className={`flex items-start gap-2 py-1 text-sm ${e.type === 'heading' ? 'font-semibold' : ''}`}
+                            style={{ paddingLeft: e.level > 0 ? (e.level - 1) * 16 : 0 }}>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                                e.type === 'heading' ? 'bg-purple-100 text-purple-700' :
+                                e.type === 'table' ? 'bg-blue-100 text-blue-700' :
+                                e.type === 'list' ? 'bg-green-100 text-green-700' :
+                                'bg-gray-100 text-gray-500'
+                            }`}>{e.type === 'heading' ? `H${e.level}` : e.type}</span>
+                            <span className="text-gray-400 text-xs">{e.styleName}</span>
+                            <span className="text-gray-600 truncate">{e.textPreview}</span>
+                        </div>
+                    ))}
+                    <p className="text-xs text-gray-400 mt-2">
+                        Tables: {structure.tableCount} &middot; Images: {structure.imageCount} &middot; Lists: {structure.listCount}
+                    </p>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Comparison View ───────────────────────────────────────
+function ComparisonView({ result, profileId, onMap, onRefresh }) {
+    if (!result) return null;
+    const [filter, setFilter] = useState('all');
+
+    const filtered = result.matches.filter(m =>
+        filter === 'all' ? true :
+        filter === 'exact' ? m.matchType === 'EXACT' :
+        filter === 'close' ? m.matchType === 'CLOSE_MATCH' :
+        m.matchType === 'UNKNOWN'
+    );
+
+    return (
+        <div className="fade-in">
+            {/* Summary */}
+            <div className="grid grid-cols-4 gap-3 mb-4">
+                <div className="bg-gray-100 rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-gray-700">{result.totalStyles}</p>
+                    <p className="text-xs text-gray-500">Total</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-green-700">{result.matchedCount}</p>
+                    <p className="text-xs text-green-600">Matched</p>
+                </div>
+                <div className="bg-yellow-50 rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-yellow-700">{result.closeMatchCount}</p>
+                    <p className="text-xs text-yellow-600">Close</p>
+                </div>
+                <div className="bg-red-50 rounded-lg p-3 text-center">
+                    <p className="text-2xl font-bold text-red-700">{result.unknownCount}</p>
+                    <p className="text-xs text-red-600">Unknown</p>
+                </div>
+            </div>
+
+            {/* Filter tabs */}
+            <div className="flex gap-2 mb-4">
+                {['all','exact','close','unknown'].map(f => (
+                    <button key={f} onClick={() => setFilter(f)}
+                        className={`px-3 py-1 rounded-full text-sm capitalize ${filter === f ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                        {f}
+                    </button>
+                ))}
+            </div>
+
+            {/* Results */}
+            <div className="space-y-2 max-h-96 overflow-auto">
+                {filtered.map((m, i) => (
+                    <div key={i} className="bg-white border rounded-lg p-3">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium">{m.documentStyle}</span>
+                                <span className={`badge badge-${m.matchType === 'EXACT' ? 'exact' : m.matchType === 'CLOSE_MATCH' ? 'close' : 'unknown'}`}>
+                                    {m.matchType.replace('_', ' ')}
+                                </span>
+                            </div>
+                            {m.matchedApprovedStyle && (
+                                <span className="text-sm text-gray-500">→ {m.matchedApprovedStyle}</span>
+                            )}
+                        </div>
+                        {/* Confidence bar */}
+                        {m.matchType !== 'EXACT' && (
+                            <div className="confidence-bar mt-2" style={{ width: '100%' }}>
+                                <div className="confidence-fill" style={{
+                                    width: `${Math.round(m.confidence * 100)}%`,
+                                    background: m.confidence > 0.7 ? '#22c55e' : m.confidence > 0.4 ? '#f59e0b' : '#ef4444'
+                                }}></div>
+                            </div>
+                        )}
+                        {/* Suggestions */}
+                        {m.suggestions && m.suggestions.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                                {m.suggestions.map((s, j) => (
+                                    <div key={j} className="flex items-center justify-between text-sm">
+                                        <span className="text-gray-600">
+                                            {s.approvedStyle} <span className="text-gray-400">({Math.round(s.score * 100)}% - {s.reason})</span>
+                                        </span>
+                                        {(m.matchType === 'CLOSE_MATCH' || m.matchType === 'UNKNOWN') && (
+                                            <button onClick={() => onMap(m.documentStyle, s.approvedStyle)}
+                                                className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded hover:bg-blue-200">
+                                                Map to this
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {/* Manual mapping for unknowns */}
+                        {m.matchType === 'UNKNOWN' && <ManualMapper docStyle={m.documentStyle} profileId={profileId} onMap={onMap} />}
+                    </div>
+                ))}
+            </div>
+
+            {/* Batch actions */}
+            {result.closeMatchCount > 0 && (
+                <div className="mt-4 flex gap-2">
+                    <button onClick={() => acceptAllClose(result, profileId, onMap, onRefresh)}
+                        className="bg-green-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-600">
+                        Accept All Close Matches
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+async function acceptAllClose(result, profileId, onMap, onRefresh) {
+    const mappings = result.matches
+        .filter(m => m.matchType === 'CLOSE_MATCH' && m.matchedApprovedStyle)
+        .map(m => ({ profileId, unknownStyle: m.documentStyle, approvedStyle: m.matchedApprovedStyle, source: 'auto' }));
+    if (!mappings.length) return;
+    await api('/mappings/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mappings)
+    });
+    onRefresh();
+}
+
+// ─── Manual Mapper ─────────────────────────────────────────
+function ManualMapper({ docStyle, profileId, onMap }) {
+    const [expanded, setExpanded] = useState(false);
+    const [approved, setApproved] = useState([]);
+    const [selected, setSelected] = useState('');
+
+    useEffect(() => {
+        if (expanded && !approved.length && profileId) {
+            api(`/profiles/${profileId}/names`).then(setApproved).catch(() => {});
+        }
+    }, [expanded, profileId]);
+
+    if (!expanded) return (
+        <button onClick={() => setExpanded(true)}
+            className="mt-1 text-xs text-blue-500 hover:underline">
+            Manually assign approved style...
+        </button>
+    );
+
+    return (
+        <div className="mt-2 flex gap-2 items-center">
+            <select className="text-sm border rounded px-2 py-1 flex-1" value={selected} onChange={e => setSelected(e.target.value)}>
+                <option value="">Select approved style...</option>
+                {Array.isArray(approved) && approved.map((a, i) => <option key={i} value={a}>{a}</option>)}
+            </select>
+            <button onClick={() => { if (selected) { onMap(docStyle, selected); setExpanded(false); } }}
+                className="text-xs bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600" disabled={!selected}>
+                Save
+            </button>
+        </div>
+    );
+}
+
+// ─── Mapping Dictionary View ───────────────────────────────
+function MappingDictionary({ profileId }) {
+    const [mappings, setMappings] = useState([]);
+
+    useEffect(() => {
+        if (profileId) loadMappings();
+    }, [profileId]);
+
+    const loadMappings = () => api(`/mappings?profileId=${profileId}`).then(setMappings).catch(() => {});
+
+    const deleteMappingItem = async (id) => {
+        await api(`/mappings/${id}`, { method: 'DELETE' });
+        loadMappings();
+    };
+
+    if (!mappings.length) return <p className="text-gray-400 text-sm">No style mappings saved yet.</p>;
+
+    return (
+        <div className="overflow-auto max-h-80">
+            <table className="w-full text-sm">
+                <thead><tr className="text-left text-gray-500 border-b">
+                    <th className="pb-2">Unknown Style</th><th className="pb-2">→ Mapped To</th><th className="pb-2">Source</th><th className="pb-2">Used</th><th className="pb-2"></th>
+                </tr></thead>
+                <tbody>
+                    {mappings.map(m => (
+                        <tr key={m.id} className="border-b border-gray-100">
+                            <td className="py-2">{m.unknownStyle}</td>
+                            <td className="py-2 font-medium text-green-700">{m.approvedStyle}</td>
+                            <td className="py-2 text-gray-400">{m.mappingSource}</td>
+                            <td className="py-2">{m.timesUsed}x</td>
+                            <td className="py-2">
+                                <button onClick={() => deleteMappingItem(m.id)} className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+// ─── Profile Viewer ────────────────────────────────────────
+function ProfileViewer({ profile }) {
+    const [styles, setStyles] = useState([]);
+    const [loaded, setLoaded] = useState(false);
+
+    useEffect(() => {
+        if (profile && !loaded) {
+            api(`/profiles/${profile.id}/styles`).then(s => { setStyles(s); setLoaded(true); }).catch(() => {});
+        }
+    }, [profile]);
+
+    if (!profile) return null;
+
+    return (
+        <div>
+            <div className="flex items-center justify-between mb-3">
+                <div>
+                    <h3 className="font-semibold">{profile.profileName}</h3>
+                    <p className="text-xs text-gray-400">{profile.styleCount} approved styles</p>
+                </div>
+                {profile.default && <span className="badge bg-blue-100 text-blue-700">Default</span>}
+            </div>
+            {loaded && (
+                <div className="overflow-auto max-h-64">
+                    <table className="w-full text-sm">
+                        <thead><tr className="text-left text-gray-500 border-b">
+                            <th className="pb-2">Style Name</th><th className="pb-2">Element</th><th className="pb-2">HTML Output</th>
+                        </tr></thead>
+                        <tbody>
+                            {styles.map((s, i) => (
+                                <tr key={i} className="border-b border-gray-100">
+                                    <td className="py-1.5 font-medium">{s.styleName}</td>
+                                    <td className="py-1.5 text-gray-500 font-mono text-xs">{s.element}</td>
+                                    <td className="py-1.5 text-gray-500 font-mono text-xs">{s.resultedHTML}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Main App ──────────────────────────────────────────────
+function App() {
+    const [tab, setTab] = useState('upload');
+    const [documents, setDocuments] = useState([]);
+    const [selectedDoc, setSelectedDoc] = useState(null);
+    const [structure, setStructure] = useState(null);
+    const [comparison, setComparison] = useState(null);
+    const [profiles, setProfiles] = useState([]);
+    const [defaultProfile, setDefaultProfile] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [toast, setToast] = useState(null);
+
+    const showToast = (message, type = 'info') => setToast({ message, type });
+
+    const loadDocuments = () => api('/documents').then(setDocuments).catch(e => showToast(e.message, 'error'));
+    const loadProfiles = () => api('/profiles').then(data => {
+        setProfiles(data);
+        const def = data.find(p => p.default);
+        if (def) setDefaultProfile(def);
+    }).catch(() => {});
+
+    useEffect(() => { loadDocuments(); loadProfiles(); }, []);
+
+    const handleExtract = async (doc) => {
+        setLoading(true);
+        try {
+            const s = await api(`/extraction/${doc.id}`, { method: 'POST' });
+            setStructure(s);
+            setComparison(null);
+            loadDocuments();
+            showToast(`Extracted ${s.styles.length} styles`, 'success');
+        } catch (e) { showToast(e.message, 'error'); }
+        finally { setLoading(false); }
+    };
+
+    const handleCompare = async (doc) => {
+        setLoading(true);
+        try {
+            const profileId = defaultProfile?.id || '';
+            const c = await api(`/comparison/${doc.id}?profileId=${profileId}`, { method: 'POST' });
+            setComparison(c);
+            loadDocuments();
+            showToast(`Compared: ${c.matchedCount} matched, ${c.closeMatchCount} close, ${c.unknownCount} unknown`, 'success');
+        } catch (e) { showToast(e.message, 'error'); }
+        finally { setLoading(false); }
+    };
+
+    const handleMap = async (unknownStyle, approvedStyle) => {
+        try {
+            await api('/mappings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    profileId: defaultProfile?.id || comparison?.profileId,
+                    unknownStyle, approvedStyle, source: 'manual'
+                })
+            });
+            showToast(`Mapped "${unknownStyle}" → "${approvedStyle}"`, 'success');
+            // Re-compare to reflect the new mapping
+            if (selectedDoc) handleCompare(selectedDoc);
+        } catch (e) { showToast(e.message, 'error'); }
+    };
+
+    const handleDownloadReport = async (format) => {
+        if (!selectedDoc) return;
+        const profileId = defaultProfile?.id || '';
+        const url = `/api/reports/${selectedDoc.id}/${format}?profileId=${profileId}`;
+        window.open(url, '_blank');
+    };
+
+    const selectDoc = (doc) => {
+        setSelectedDoc(doc);
+        setStructure(null);
+        setComparison(null);
+        setTab('documents');
+    };
+
+    const tabs = [
+        { id: 'upload', label: 'Upload' },
+        { id: 'documents', label: 'Documents' },
+        { id: 'profiles', label: 'Profiles' },
+        { id: 'mappings', label: 'Mappings' },
+    ];
+
+    return (
+        <div className="max-w-5xl mx-auto px-4 py-6">
+            {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+
+            {/* Header */}
+            <div className="mb-6">
+                <h1 className="text-2xl font-bold text-gray-800">DocStyler</h1>
+                <p className="text-gray-500 text-sm">Document Style Validation Platform</p>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-6 border-b mb-6">
+                {tabs.map(t => (
+                    <button key={t.id} className={`pb-3 text-sm ${tab === t.id ? 'tab-active' : 'text-gray-400 hover:text-gray-600'}`}
+                        onClick={() => setTab(t.id)}>{t.label}</button>
+                ))}
+            </div>
+
+            {/* Upload Tab */}
+            {tab === 'upload' && (
+                <div className="fade-in">
+                    <UploadZone onUpload={() => { loadDocuments(); showToast('File uploaded!', 'success'); }} />
+                    <div className="mt-6">
+                        <h2 className="text-lg font-semibold mb-3">Recent Documents</h2>
+                        <DocumentList documents={documents.slice(0, 5)} onSelect={selectDoc} selected={selectedDoc} onRefresh={loadDocuments} />
+                    </div>
+                </div>
+            )}
+
+            {/* Documents Tab */}
+            {tab === 'documents' && (
+                <div className="fade-in grid grid-cols-3 gap-6">
+                    {/* Left: Document list */}
+                    <div className="col-span-1">
+                        <h2 className="text-lg font-semibold mb-3">Documents</h2>
+                        <DocumentList documents={documents} onSelect={(doc) => { setSelectedDoc(doc); setStructure(null); setComparison(null); }}
+                            selected={selectedDoc} onRefresh={loadDocuments} />
+                    </div>
+
+                    {/* Right: Details */}
+                    <div className="col-span-2">
+                        {selectedDoc ? (
+                            <div>
+                                <div className="flex items-center justify-between mb-4">
+                                    <h2 className="text-lg font-semibold">{selectedDoc.filename}</h2>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => handleExtract(selectedDoc)} disabled={loading}
+                                            className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-600 disabled:opacity-50">
+                                            {loading ? 'Working...' : 'Extract Styles'}
+                                        </button>
+                                        <button onClick={() => handleCompare(selectedDoc)} disabled={loading}
+                                            className="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-600 disabled:opacity-50">
+                                            {loading ? 'Working...' : 'Compare Styles'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Extraction results */}
+                                {structure && (
+                                    <div className="mb-6">
+                                        <h3 className="font-semibold text-gray-700 mb-2">Extracted Structure</h3>
+                                        <ExtractionView structure={structure} />
+                                    </div>
+                                )}
+
+                                {/* Comparison results */}
+                                {comparison && (
+                                    <div className="mb-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h3 className="font-semibold text-gray-700">Comparison Results</h3>
+                                            <div className="flex gap-2">
+                                                <button onClick={() => handleDownloadReport('html')}
+                                                    className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded hover:bg-gray-200">
+                                                    Download HTML
+                                                </button>
+                                                <button onClick={() => handleDownloadReport('csv')}
+                                                    className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded hover:bg-gray-200">
+                                                    Download CSV
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <ComparisonView result={comparison} profileId={comparison.profileId}
+                                            onMap={handleMap} onRefresh={() => handleCompare(selectedDoc)} />
+                                    </div>
+                                )}
+
+                                {!structure && !comparison && (
+                                    <div className="text-center py-12 text-gray-400">
+                                        <p>Click "Extract Styles" to see the document structure,</p>
+                                        <p>or "Compare Styles" to validate against the style profile.</p>
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="text-center py-12 text-gray-400">
+                                <p>Select a document from the list</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Profiles Tab */}
+            {tab === 'profiles' && (
+                <div className="fade-in">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-semibold">Style Profiles</h2>
+                        <ProfileUploader onUpload={loadProfiles} showToast={showToast} />
+                    </div>
+                    <div className="grid gap-4">
+                        {profiles.map(p => (
+                            <div key={p.id} className="bg-white border rounded-lg p-4">
+                                <ProfileViewer profile={p} />
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Mappings Tab */}
+            {tab === 'mappings' && (
+                <div className="fade-in">
+                    <h2 className="text-lg font-semibold mb-3">Style Mapping Dictionary</h2>
+                    <p className="text-sm text-gray-500 mb-4">
+                        These mappings are remembered and automatically applied to future comparisons.
+                    </p>
+                    {defaultProfile && <MappingDictionary profileId={defaultProfile.id} />}
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Profile Uploader ──────────────────────────────────────
+function ProfileUploader({ onUpload, showToast }) {
+    const fileRef = useRef();
+
+    const handleUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('name', file.name.replace(/\.[^.]+$/, ''));
+        try {
+            await api('/profiles/upload', { method: 'POST', body: fd });
+            onUpload();
+            showToast('Profile uploaded!', 'success');
+        } catch (err) { showToast(err.message, 'error'); }
+    };
+
+    return (
+        <div>
+            <input ref={fileRef} type="file" accept=".xml" hidden onChange={handleUpload} />
+            <button onClick={() => fileRef.current?.click()}
+                className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-200">
+                Upload Profile XML
+            </button>
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
