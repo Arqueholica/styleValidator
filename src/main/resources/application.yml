@@ -1,9 +1,9 @@
 server:
-  port: 8080
+  port: ${PORT:8080}
 
 spring:
   datasource:
-    url: jdbc:h2:file:./data/docstyler
+    url: jdbc:h2:file:${DOCSTYLER_DATA_DIR:./data}/docstyler
     driver-class-name: org.h2.Driver
     username: sa
     password:
@@ -21,5 +21,5 @@ spring:
       max-request-size: 100MB
 
 docstyler:
-  upload-dir: ./uploads
+  upload-dir: ${DOCSTYLER_UPLOAD_DIR:./uploads}
   profile-path: classpath:data/styles.xml

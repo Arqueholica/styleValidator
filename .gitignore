@@ -10,3 +10,4 @@ uploads/
 .settings/
 .project
 .classpath
+.docker/
