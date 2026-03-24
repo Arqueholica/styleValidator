@@ -503,6 +503,13 @@ function App() {
         window.open(url, '_blank');
     };
 
+    const handleDownloadCorrected = async () => {
+        if (!selectedDoc) return;
+        const profileId = defaultProfile?.id || '';
+        const url = `/api/correction/${selectedDoc.id}/download?profileId=${profileId}`;
+        window.open(url, '_blank');
+    };
+
     const selectDoc = (doc) => {
         setSelectedDoc(doc);
         setStructure(null);
@@ -595,6 +602,10 @@ function App() {
                                                 <button onClick={() => handleDownloadReport('csv')}
                                                     className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded hover:bg-gray-200">
                                                     Download CSV
+                                                </button>
+                                                <button onClick={handleDownloadCorrected}
+                                                    className="text-xs bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 font-medium">
+                                                    Download Corrected Document
                                                 </button>
                                             </div>
                                         </div>
